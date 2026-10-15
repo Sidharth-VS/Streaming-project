@@ -52,8 +52,6 @@ class ControllerConfig:
     #: budget change jump the error signal, so reacting to a single excursion
     #: causes limit-cycling; requiring confirmation breaks that loop.
     confirmations_required: int = 2
-    #: Default policy step cap forwarded when the caller leaves it unset.
-    policy_kwargs: dict = field(default_factory=lambda: {"max_step": 1.35})
     #: Minimum windows between actual budget changes (dwell time).
     min_dwell_windows: int = 4
     #: Fraction bounds.
@@ -61,8 +59,8 @@ class ControllerConfig:
     f_max: float = 1.0
     #: Minimum relative change worth propagating (hysteresis).
     min_step: float = 0.05
-    #: Policy kwargs forwarded to ``build_policy``.
-    policy_kwargs: dict = field(default_factory=dict)
+    #: kwargs forwarded to ``build_policy`` (e.g. max_step, kp, ki, kd).
+    policy_kwargs: dict = field(default_factory=lambda: {"max_step": 1.35})
 
 
 @dataclass
