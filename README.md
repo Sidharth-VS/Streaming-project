@@ -56,8 +56,33 @@ pip install -e ".[dev,realworld]"   # numpy, pandas, matplotlib, pytest
 python -m pytest                    # 50 unit/integration tests
 python -m experiments.run_all       # full experiment suite → results/
 # or: make experiments               (make not available on some Windows shells)
+<<<<<<< Updated upstream
 ```
 
+=======
+
+# Containerized deployment (paper's Fig. 5 topology on a real broker):
+docker compose up -d --build         # Redpanda + 15 nodes, 60 windows
+MAX_WINDOWS=20 docker compose up -d --build   # short smoke run
+docker compose logs -f root          # watch the root (Ctrl-C stops following)
+docker compose ps                    # nodes exit after their windows
+python scripts/summarize_docker_results.py   # or: make docker-results
+docker compose down                  # stop the broker when done
+```
+
+The root writes `results/docker_results.csv` (one row per window) and the
+extractor turns it plus the root's JSON log line into
+`results/docker_summary.json` with the accuracy-vs-target, bandwidth and
+latency aggregates and a `pass` verdict.
+
+The deployment path builds one image (`Dockerfile`) and starts 8 sources →
+4 L1 → 2 L2 → 1 root with a Redpanda broker (`docker-compose.yml`).  Every
+container runs `python -m approxiot.runtime.node`; `scripts/docker-entrypoint.sh`
+applies the paper's 20/40/80 ms `tc-netem` egress latency per tier.  Workload,
+rate scale, window size, sampling fraction, query and controller target are
+environment variables in the compose file.
+
+>>>>>>> Stashed changes
 Optional heavier paths: `pip install -e ".[kafka]"` for the confluent-kafka
 transport module; `download=True` arguments in `datagen/real_world.py` fetch
 the real NYC TLC/OpenAQ datasets (offline falls back to documented

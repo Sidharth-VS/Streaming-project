@@ -1,0 +1,14 @@
+# Container scripts must keep LF even on Windows checkouts (core.autocrlf=true),
+# otherwise the shebang becomes "#!/usr/bin/env bash\r" and exec fails with
+# `env: 'bash\r': No such file or directory`.
+*.sh            text eol=lf
+docker-entrypoint.sh text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+Makefile        text eol=lf
+*.md            text eol=lf
+
+# Keep the experiment/data artifacts binary-safe for git diff noise.
+*.png           binary
+*.csv           text
