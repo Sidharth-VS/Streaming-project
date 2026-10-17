@@ -22,6 +22,7 @@ from experiments.common import (
     default_latency,
     run_config,
     save_csv,
+    save_fig,
     save_json,
     summary_table,
 )
@@ -91,10 +92,28 @@ def main(seed: int = 42, windows: int = 32) -> dict:
     piv_multi = multi_agg.pivot(index="fraction", columns="method", values="realized_loss")
     approx_worse_multi = int((piv_multi["approxiot"] > piv_multi["srs"] * 1.3).sum())
 
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(6.5, 4))
+    for method, g in multi_agg.groupby("method"):
+        g = g.sort_values("fraction")
+        ax.plot(g["fraction"], g["realized_loss"].clip(lower=1e-8), marker="o",
+                label=method)
+    ax.set_yscale("log")
+    ax.set_xlabel("sampling fraction")
+    ax.set_ylabel("median accuracy loss (3 seeds)")
+    proxy_note = " + ".join(f"{name}{'(proxy)' if proxy else ''}"
+                            for name, proxy in proxy_flags.items())
+    ax.set_title(f"EXP5: real-world workload ({proxy_note})")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend()
+    fig_path = save_fig(fig, "exp5_real_world.png")
+
     return {
         "experiment": "exp5_real_world",
         "csv": str(csv_path),
         "multiseed_csv": str(multi_path),
+        "figure": str(fig_path),
         "proxy_datasets_used": proxy_flags,
         "summary_rows": summaries,
         "qualitative_check": {

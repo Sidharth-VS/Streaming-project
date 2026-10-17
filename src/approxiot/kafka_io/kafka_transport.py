@@ -37,7 +37,10 @@ def _encode(message: Any) -> bytes:
             "type": "window",
             "sender": message.sender,
             "sender_window": message.sender_window,
-            "items": [[i.substream, i.value, i.src_window] for i in message.items],
+            "items": [
+                [i.substream, i.value, i.src_window, i.created_at]
+                for i in message.items
+            ],
             "W": message.W,
             "C": message.C,
             "item_weights": list(message.item_weights),
@@ -61,7 +64,12 @@ def _decode(raw: bytes) -> Any:
 
     payload = json.loads(raw)
     if payload["type"] == "window":
-        items = [Item(s, float(v), int(w)) for s, v, w in payload["items"]]
+        items = []
+        for row in payload["items"]:
+            if len(row) >= 4:
+                items.append(Item(row[0], float(row[1]), int(row[2]), created_at=float(row[3])))
+            else:  # backwards-compatible 3-field encoding
+                items.append(Item(row[0], float(row[1]), int(row[2])))
         weights = [float(w) for w in payload.get("item_weights", [])]
         if weights and len(weights) == len(items):
             items = [it._replace(eff_weight=w) for it, w in zip(items, weights)]
@@ -82,34 +90,82 @@ def _decode(raw: bytes) -> Any:
     )
 
 
-class KafkaTransport:  # pragma: no cover - requires a broker
-    """``confluent-kafka``-backed transport implementing the bus interface."""
+class KafkaTransport:
+    """``confluent-kafka``-backed transport implementing the bus interface.
 
-    def __init__(self, bootstrap_servers: str = "redpanda:9092", group_id: str = "approxiot"):
-        if not _KAFKA_AVAILABLE:
-            raise ImportError("install the 'kafka' extra: pip install -e \".[kafka]\"")
-        self._producer = _KafkaProducer({"bootstrap.servers": bootstrap_servers})
-        self._consumer = _KafkaConsumer(
-            {
-                "bootstrap.servers": bootstrap_servers,
-                "group.id": group_id,
-                "auto.offset.reset": "earliest",
-            }
-        )
+    One transport serves one node.  A node subscribes to several topics (its
+    data topic and the ``control`` topic), so ``poll`` filters the records it
+    drains by topic and buffers the rest: ``confluent-kafka``'s ``consume``
+    returns records from *all* subscribed topics regardless of which topic the
+    caller asked for.  ``subscribe`` also **replaces** the subscription list, so
+    subscriptions are grown cumulatively; otherwise polling the data topic
+    silently unsubscribes the control topic and budget updates are never seen.
+
+    ``producer``/``consumer`` may be injected for tests.  Each node needs its
+    own ``group_id`` when sharing the control topic, otherwise the group
+    splits the broadcast instead of every node seeing each update.
+    """
+
+    def __init__(
+        self,
+        bootstrap_servers: str = "redpanda:9092",
+        group_id: str = "approxiot",
+        *,
+        producer: Any | None = None,
+        consumer: Any | None = None,
+    ):
+        if producer is not None and consumer is not None:
+            self._producer = producer
+            self._consumer = consumer
+        else:
+            if not _KAFKA_AVAILABLE:
+                raise ImportError("install the 'kafka' extra: pip install -e \".[kafka]\"")
+            self._producer = _KafkaProducer({"bootstrap.servers": bootstrap_servers})
+            self._consumer = _KafkaConsumer(
+                {
+                    "bootstrap.servers": bootstrap_servers,
+                    "group.id": group_id,
+                    "auto.offset.reset": "earliest",
+                }
+            )
         self._subscribed: set[str] = set()
+        self._buffers: dict[str, List[Any]] = {}
 
     def publish(self, topic: str, message: Any, arrival_window: int = 0) -> None:
-        # arrival_window is ignored: real latency comes from the network.
+        # arrival_window is ignored: real latency comes from the network
+        # (``tc-netem`` in docker-compose.yml).
         self._producer.produce(topic, _encode(message))
         self._producer.poll(0)
 
+    def _subscribe(self, topic: str) -> None:
+        if topic in self._subscribed:
+            return
+        self._subscribed.add(topic)
+        self._buffers.setdefault(topic, [])
+        self._consumer.subscribe(sorted(self._subscribed))
+
     def poll(self, topic: str, window: int = 0) -> List[Any]:
-        if topic not in self._subscribed:
-            self._consumer.subscribe([topic])
-            self._subscribed.add(topic)
-        messages: List[Any] = []
-        for record in self._consumer.consume(num_messages=500, timeout=0.1):
+        self._subscribe(topic)
+        for record in self._consumer.consume(num_messages=500, timeout=0.1) or []:
             if record.error():
                 continue
-            messages.append(_decode(record.value()))
+            self._buffers.setdefault(record.topic(), []).append(_decode(record.value()))
+        messages = self._buffers.get(topic, [])
+        self._buffers[topic] = []
         return messages
+
+    def backlog(self, topic: str) -> int:
+        return len(self._buffers.get(topic, []))
+
+    def flush(self, timeout: float = 10.0) -> None:
+        self._producer.flush(timeout)
+
+    def close(self) -> None:
+        try:
+            self._producer.flush(5.0)
+        except Exception:  # pragma: no cover - best-effort shutdown
+            pass
+        try:
+            self._consumer.close()
+        except Exception:  # pragma: no cover - best-effort shutdown
+            pass

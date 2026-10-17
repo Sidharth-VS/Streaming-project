@@ -42,19 +42,28 @@ from experiments.common import (
 
 STEP_WINDOWS = 20
 
+def _adaptive(label: str, policy: str, target: float) -> dict:
+    """One closed-loop regime starting from an over-provisioned fraction."""
+    return {
+        "label": label,
+        "frac": 0.9,
+        "controller": ControllerConfig(
+            target_error=target, policy=policy,
+            cadence_windows=2, min_dwell_windows=3,
+            dead_band=0.3, confirmations_required=2,
+            f_min=0.02, policy_kwargs={"max_step": 1.35},
+        ),
+    }
+
+
+#: Plan §5 asks for at least two error targets: 0.5% and 0.1%.
 REGIMES = (
     {"label": "static-conservative", "frac": 0.9, "controller": None},
     {"label": "static-tuned", "frac": 0.3, "controller": None},
-    {"label": "adaptive-p", "frac": 0.9,
-     "controller": ControllerConfig(target_error=0.005, policy="proportional",
-                                    cadence_windows=2, min_dwell_windows=3,
-                                    dead_band=0.3, confirmations_required=2,
-                                    f_min=0.02, policy_kwargs={"max_step": 1.35})},
-    {"label": "adaptive-pid", "frac": 0.9,
-     "controller": ControllerConfig(target_error=0.005, policy="pid",
-                                    cadence_windows=2, min_dwell_windows=3,
-                                    dead_band=0.3, confirmations_required=2,
-                                    f_min=0.02, policy_kwargs={"max_step": 1.35})},
+    _adaptive("adaptive-p", "proportional", 0.005),
+    _adaptive("adaptive-pid", "pid", 0.005),
+    _adaptive("adaptive-p-tight", "proportional", 0.001),
+    _adaptive("adaptive-pid-tight", "pid", 0.001),
 )
 
 
@@ -103,22 +112,64 @@ def main(seed: int = 42, windows: int = NUM_WINDOWS) -> dict:
                 fr["scenario"] = scenario
                 fr["regime"] = regime["label"]
                 fraction_curves.append(fr)
-            summary = dict(result.summary)
-            summary["scenario"] = scenario
-            summary["regime"] = regime["label"]
-            summary["violations"] = int(sum(
-                1 for r in result.rows
-                if np.isfinite(r["stderr_relative"]) and r["stderr_relative"] > 1.5 * (regime["controller"].target_error if regime["controller"] else 0.005)
-            ))
     all_rows = pd.concat(rows, ignore_index=True)
     fraction_df = pd.concat(fraction_curves, ignore_index=True) if fraction_curves else pd.DataFrame()
+    # Violation: observed relative stderr >50% above the target.  Warm-up
+    # windows have no root input, so mark them NaN (not "compliant").
+    threshold = all_rows["target"].fillna(0.005)
+    has_result = (all_rows["n_in_root"] > 0) & np.isfinite(all_rows["stderr_relative"])
+    violation = pd.Series(np.nan, index=all_rows.index)
+    violation[has_result] = (
+        all_rows.loc[has_result, "stderr_relative"] > 1.5 * threshold[has_result]
+    ).astype(float)
+    all_rows["violation"] = violation
+    all_rows.loc[~has_result, "stderr_relative"] = np.nan
     csv_path = save_csv(all_rows, "exp6_adaptive_controller.csv")
     frac_path = save_csv(fraction_df, "exp6_fraction_history.csv")
 
     agg = all_rows.groupby(["scenario", "regime"]).agg(
         median_loss=("realized_loss", "median"),
+        median_stderr=("stderr_relative", "median"),
         bandwidth_saved=("bandwidth_saved", "mean"),
+        fraction_std=("fraction_root", "std"),
+        violation_rate=("violation", "mean"),
     ).reset_index()
+
+    # Plan Phase 7 metric: windows until smoothed error returns to within 50%
+    # of target after the step-change.
+    def _reconverge_window(regime_rows: pd.DataFrame, target: float):
+        post = regime_rows[regime_rows["window"] >= STEP_WINDOWS].sort_values("window")
+        smooth = post["stderr_relative"].rolling(3, min_periods=1).median()
+        hits = post.loc[np.isfinite(smooth) & (smooth <= 1.5 * target), "window"]
+        return int(hits.iloc[0]) if len(hits) else None
+
+    reconverge = {
+        regime["label"]: _reconverge_window(
+            all_rows[(all_rows["scenario"] == "step-change")
+                     & (all_rows["regime"] == regime["label"])],
+            regime["controller"].target_error,
+        )
+        for regime in REGIMES
+        if regime["controller"] is not None
+    }
+
+    # Phase 6/7 claim on measured data: adaptive PID beats a manually tuned
+    # static budget on accuracy and saves bandwidth versus the conservative
+    # static setting in steady state and after the rate step-change.
+    regime_stats = agg.set_index(["scenario", "regime"])
+    checks: dict[str, dict[str, bool]] = {}
+    for scenario in ("steady", "step-change"):
+        adaptive = regime_stats.loc[(scenario, "adaptive-pid")]
+        tuned = regime_stats.loc[(scenario, "static-tuned")]
+        conservative = regime_stats.loc[(scenario, "static-conservative")]
+        checks[scenario] = {
+            "adaptive_loss_below_static_tuned": bool(
+                adaptive["median_loss"] < tuned["median_loss"]
+            ),
+            "adaptive_saves_more_bandwidth_than_conservative": bool(
+                adaptive["bandwidth_saved"] > conservative["bandwidth_saved"]
+            ),
+        }
 
     # Figure: fraction-over-time for the step-change scenario, adaptive vs static.
     fig, axes = plt.subplots(2, 1, figsize=(7, 6), sharex=True)
@@ -130,7 +181,7 @@ def main(seed: int = 42, windows: int = NUM_WINDOWS) -> dict:
         ax.axvline(STEP_WINDOWS, color="k", ls=":", alpha=0.5)
         ax.grid(alpha=0.3)
     axes[0].set_ylabel("relative stderr")
-    axes[0].legend(fontsize="small")
+    axes[0].legend(fontsize="x-small", ncol=2)
     axes[0].set_title("EXP6: rate step-change — adaptive vs static regimes")
     axes[1].set_ylabel("sampling fraction (root)")
     axes[1].set_xlabel("window")
@@ -142,6 +193,11 @@ def main(seed: int = 42, windows: int = NUM_WINDOWS) -> dict:
         "fraction_history_csv": str(frac_path),
         "figure": str(fig_path),
         "aggregate": agg.to_dict(orient="records"),
+        "time_to_reconverge_windows": reconverge,
+        "qualitative_check": {
+            "per_scenario": checks,
+            "pass": all(all(v.values()) for v in checks.values()),
+        },
     }
 
 

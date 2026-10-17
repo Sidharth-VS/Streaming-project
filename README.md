@@ -30,7 +30,8 @@ Two deliverables:
 | Error estimation (Eq. 10–14, 68-95-99.7) | `src/approxiot/error_estimation/error_bounds.py` |
 | SRS baseline (§IV-B) | `src/approxiot/baselines/srs.py` |
 | Kafka topics (Fig. 5) | `src/approxiot/kafka_io/` (pluggable `InMemoryTransport` default) |
-| 25-machine testbed (§V-A) | `src/approxiot/simulation.py` (in-process 8→4→2→1 tree) |
+| 25-machine testbed (§V-A) | `src/approxiot/simulation.py` (in-process) + `docker-compose.yml` / `runtime/` (real Redpanda) |
+| WAN latency (§V-A) | `tc-netem` 20/40/80 ms in Docker; `src/approxiot/latency.py` event trace for experiments |
 | §V-D/E synthetic workloads | `src/approxiot/datagen/synthetic.py` |
 | NYC TLC + Brasov/OpenAQ datasets (§VI) | `src/approxiot/datagen/real_world.py` |
 | **Novel**: adaptive budget controller | `src/approxiot/controller/` |
@@ -53,31 +54,59 @@ root:        same sampling ─▶ weighted query (sum/mean) ─▶ error bound
 
 ```sh
 pip install -e ".[dev,realworld]"   # numpy, pandas, matplotlib, pytest
-python -m pytest                    # 50 unit/integration tests
+python -m pytest                    # 63 unit/integration tests
 python -m experiments.run_all       # full experiment suite → results/
 # or: make experiments               (make not available on some Windows shells)
+
+# Containerized deployment (paper's Fig. 5 topology on a real broker):
+docker compose up -d --build         # Redpanda + 15 nodes, 60 windows
+MAX_WINDOWS=20 docker compose up -d --build   # short smoke run
+docker compose logs -f root          # watch the root (Ctrl-C stops following)
+docker compose ps                    # nodes exit after their windows
+cat results/docker_results.csv       # estimate, error bound, fraction, latency
+docker compose down                  # stop the broker when done
 ```
 
+The deployment path builds one image (`Dockerfile`) and starts 8 sources →
+4 L1 → 2 L2 → 1 root with a Redpanda broker (`docker-compose.yml`).  Every
+container runs `python -m approxiot.runtime.node`; `scripts/docker-entrypoint.sh`
+applies the paper's 20/40/80 ms `tc-netem` egress latency per tier.  Workload,
+rate scale, window size, sampling fraction, query and controller target are
+environment variables in the compose file.
+
 Optional heavier paths: `pip install -e ".[kafka]"` for the confluent-kafka
-transport module; `download=True` arguments in `datagen/real_world.py` fetch
-the real NYC TLC/OpenAQ datasets (offline falls back to documented
-distribution-matched proxies).
+transport module (used by the deployment path); `download=True` arguments in
+`datagen/real_world.py` fetch the real NYC TLC/OpenAQ datasets (offline falls
+back to documented distribution-matched proxies).
+
+See [RUNNING.md](RUNNING.md) for the full command reference, verification log,
+and the current status of the adaptive-controller novelty.
 
 ## Experiments → paper figures
 
 | File | Reproduces / studies |
 |---|---|
-| `experiments/exp1_sampling_fraction.py` | §V-B Figs. 6–9 accuracy/throughput vs sampling fraction |
-| `experiments/exp2_window_size.py` | §V-C Fig. 10 e2e latency vs window size |
-| `experiments/exp3_fluctuating_rates.py` | §V-D fluctuating rate settings 1/2/3 |
+| `experiments/exp1_sampling_fraction.py` | §V-B Figs. 6–9 accuracy/throughput vs fraction, Gaussian **and Poisson** |
+| `experiments/exp2_window_size.py` | §V-C Fig. 10 measured latency vs window, ApproxIoT/SRS/native |
+| `experiments/exp3_fluctuating_rates.py` | §V-D rate settings 1/2/3, Gaussian **and Poisson** (Fig. 11a/b) |
 | `experiments/exp4_skew.py` | §V-E extreme-skew workload (the dramatic gap) |
 | `experiments/exp5_real_world.py` | §VI real-world datasets (proxy fallback documented) |
 | `experiments/exp6_adaptive_controller.py` | **Novel**: static vs adaptive budget under steady / step-change / skew, two error targets |
 
-Each experiment writes per-window rows (CSV), a PNG figure, and a JSON verdict
-of the expected *qualitative* paper trend into [results/](results/).
-`results/summary.json` aggregates all six verdicts. Regenerate with
-`python -m experiments.run_all`.
+Each experiment writes its CSV output, a PNG figure, and (where it defines
+one) a JSON verdict of the expected *qualitative* paper trend into
+[results/](results/). `results/summary.json` aggregates all six verdicts.
+Regenerate with `python -m experiments.run_all`.
+
+**Metrics that are measured, not closed-form.** Throughput is the number of
+items processed per *simulated* second by the input-saturated cluster (§V-B),
+not Python wall-clock speed, so it does not grow with the window size.  EXP1/EXP2
+use `PAPER_RATE_SCALE` ≈ 11k items/s — the paper's measured operating point.
+Latency comes from an event trace (`src/approxiot/latency.py`): each item is
+created at a time inside its source window, waits for window boundaries
+(ApproxIoT/native), spends `n / capacity` seconds at each node and crosses the
+20/40/80 ms links.  **SRS is windowless** per §V-C, so its latency stays flat as
+the window grows while ApproxIoT's increases.
 
 ## The novelty: how the controller works
 
@@ -94,8 +123,9 @@ error into `AdaptiveBudgetController` (`controller/adaptive_budget.py`):
 - budgets take effect from the next window onward.
 
 EXP6 evaluates static-tuned / static-conservative / adaptive-P / adaptive-PID
-under (a) steady state, (b) a mid-run rate step-change, (c) extreme skew —
-reporting bandwidth saved and error-target violations per regime.
+(adaptive policies at both 0.5% and 0.1% targets) under (a) steady state,
+(b) a mid-run rate step-change, (c) extreme skew — reporting bandwidth saved,
+error-target violations, fraction stability and time-to-reconverge per regime.
 
 ## Differences from the original paper
 
@@ -104,13 +134,15 @@ reporting bandwidth saved and error-target violations per regime.
   Kafka and machine deployment (a `confluent-kafka`-backed transport is
   provided for the real-broker path but the experiments use the in-process
   bus for reproducibility).
-- **Latency model**: `tc-netem`-emulated 20/40/80 ms WAN latencies become
-  message arrival-window scheduling (plus an optional item-straddling jitter
-  mode that exercises the paper's asynchronous-interval Eq. 9 calibration).
-- **Scale/absolute rates**: the paper's 10⁴–10⁵ items/sec workloads are scaled
-  down (`experiments/common.py:SIM_RATE_SCALE`) so single runs take seconds;
-  relative rates, distributions, and the tree shape are preserved, so all
-  qualitative trends carry over.
+- **Latency measurement**: 20/40/80 ms `tc-netem` links are applied in the
+  Docker deployment; the in-process experiments use an event-trace latency
+  model (window waits + per-node processing at capacity), not the closed-form
+  `3·window + link` formula.  Absolute latencies therefore differ from the
+  paper's cluster but the Fig. 10 trend (ApproxIoT grows with window, SRS flat)
+  is measured rather than assumed.
+- **Throughput**: reported as simulated items/second (paper §V-B definition).
+  EXP1/EXP2 run at the paper's ~11k items/s operating point; EXP3–6 remain at a
+  reduced `SIM_RATE_SCALE` for runtime, with relative rates preserved.
 - **Datasets**: NYC TLC trips and Brasov air-quality readings are substituted
   with (a) TLC Parquet files fetched on demand / (b) the OpenAQ v2 API; when
   the network is unavailable, distribution-matched proxies (log-normal
@@ -119,13 +151,25 @@ reporting bandwidth saved and error-target violations per regime.
 - **Exact numbers will differ** from the paper's figures; the replication
   targets the same qualitative patterns, which the experiment suite checks
   programmatically and reports in `results/summary.json`.
+- **Latency saturation is not modelled.** The event trace includes window
+  waits, link delays and per-node processing at 12k items/s, but not CPU queue
+  build-up on a saturated cluster.  As a result the measured speed-up of 10%
+  sampling over native execution is ~1.2-1.4× at a 1 s window, smaller than the
+  paper's 6×; the ordering and the Fig. 10 window-size trend are reproduced.
+- **Throughput** is the simulated input rate at the paper's saturated-cluster
+  operating point (~11k items/s for EXP1/EXP2).  EXP3–6 run at a reduced rate
+  (`SIM_RATE_SCALE`) for runtime, preserving relative rates.
 
 ## Layout
 
 ```
 src/approxiot/     implementation (see table above)
+  latency.py       event-trace latency measurement (Figs. 9-10)
+  runtime/         container node entry point (Kafka/Redpanda deployment)
 experiments/       exp1..exp6 + run_all
-tests/             50 tests covering algorithms, bounds, SRS, controller, sim
+tests/             tests covering algorithms, bounds, SRS, controller, sim, runtime
+RUNNING.md         run/test command reference + verification log
+docker-compose.yml Redpanda + 8/4/2/1 node containers + tc-netem entrypoint
 results/           CSVs / PNGs / JSON verdicts (gitignored except .gitkeep)
 notebooks/         results_analysis.ipynb — loads results/ and redraws figures
 ```

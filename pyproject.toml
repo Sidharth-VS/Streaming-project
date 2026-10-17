@@ -17,7 +17,9 @@ dependencies = [
 
 [project.optional-dependencies]
 kafka = ["confluent-kafka>=2.0"]
-realworld = ["requests>=2.28"]
+# pyarrow is required for the real NYC TLC Parquet files; without it the
+# loader deliberately falls back to the distribution-matched proxy.
+realworld = ["requests>=2.28", "pyarrow>=14.0"]
 dev = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
