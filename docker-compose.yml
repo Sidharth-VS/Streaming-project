@@ -16,7 +16,7 @@ x-common-env: &common-env
   WORKLOAD: gaussian
   RATE_SCALE: "0.05"
   WINDOW_SECONDS: "2"
-  FRACTION: "0.5"
+  FRACTION: "${FRACTION:-0.5}"        # static sampling fraction for every node
   MAX_WINDOWS: "${MAX_WINDOWS:-60}"
   SEED: "42"
 
@@ -233,10 +233,10 @@ services:
       QUERY: sum
       CONFIDENCE: p997
       # Novel closed loop: meet a 0.5% relative-error target automatically.
-      TARGET_ERROR: "0.005"
       POLICY: pid
       CADENCE_WINDOWS: "2"
       MIN_DWELL_WINDOWS: "3"
       DEAD_BAND: "0.3"
-      RESULTS_PATH: /results/docker_results.csv
+      TARGET_ERROR: "${TARGET_ERROR:-0.005}"
+      RESULTS_PATH: /results/${RESULTS_FILE:-docker_results.csv}
     command: ["python", "-m", "approxiot.runtime.node"]

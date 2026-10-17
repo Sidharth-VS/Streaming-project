@@ -256,3 +256,7 @@ Known limitations:
   documented proxy fallback unless `download=True` is passed with `pyarrow`.
 - **EXP3–6** run at a reduced `SIM_RATE_SCALE` for runtime, with relative rates
   and distributions preserved; EXP1/EXP2 run at the paper's ~11k items/s.
+
+
+TO run with sampling fraction 0.3
+`TARGET_ERROR=0 FRACTION=0.3 RESULTS_FILE=baseline_03_f50.csv docker compose up --build`
