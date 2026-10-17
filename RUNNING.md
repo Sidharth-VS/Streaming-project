@@ -140,53 +140,11 @@ Monitor and collect:
 docker compose ps
 docker compose logs -f root                  # Ctrl-C stops following only
 docker compose logs --tail=20 source-a1 l1-1 l2-1
+docker compose logs root | tail -20
+make docker-results                          # cat results/docker_results.csv
 
 docker compose down                          # stop the broker when done
 ```
-
-### Extracting / recording the results
-
-Two artifacts are produced by the root node, nothing else has to be collected:
-
-| Artifact | Written by | Contents |
-|---|---|---|
-| `results/docker_results.csv` | root container (`RESULTS_PATH`) | one row per window: estimate, error bound, relative stderr, sampled count, fraction, bandwidth saved, e2e latency |
-| root log line (JSON) | root container, on exit | totals + medians for the whole run |
-
-The extractor turns both into a single recordable file, `results/docker_summary.json`:
-
-```bash
-python scripts/summarize_docker_results.py      # or: make docker-results
-```
-
-It skips the warm-up windows (`n_in_root == 0`), prints the per-window table, then
-aggregates accuracy vs the 0.5 % target, bandwidth saved, latency and controller
-activity, and ends with `pass: true/false`:
-
-```json
-{
-  "windows_with_results": 55,
-  "median_relative_stderr": 0.004088,
-  "windows_within_target_pct": 72.7,
-  "median_latency_ms": 4350.6,
-  "final_fraction": 0.675,
-  "bandwidth_saved_total": 0.341611,
-  "checks": {"data_flowed": true, "accuracy_target_met": true,
-             "bandwidth_saved_positive": true, "controller_acted": true},
-  "pass": true
-}
-```
-
-Other ways to get the same numbers:
-
-```bash
-make docker-csv                                   # raw per-window CSV
-docker compose logs root | tail -1                # the JSON summary line
-docker compose logs root | grep '^{' > results/docker_root_log.json
-```
-
-`results/docker_results.csv` is **overwritten on every run**, so copy
-`results/docker_summary.json` somewhere else if you need to keep several runs.
 
 Expected startup line in every node container:
 
@@ -225,11 +183,6 @@ running**, which is why a foreground `docker compose up` appears to hang. Use
   `adaptive-*-tight` saturates at fraction 1.0 and can show high violation
   rates. Use the 0.5% regimes for the convergence claim;
   `time_to_reconverge_windows` is in the JSON.
-- **`env: 'bash\r': No such file or directory`:** the entrypoint was checked
-  out with CRLF endings (Windows `core.autocrlf=true`), so every node exits
-  127 before Python starts. `.gitattributes` forces `*.sh` to LF and the
-  Dockerfile strips stray `\r` while building, so a rebuild fixes it; if you
-  edit the script on Windows, re-run `git add --renormalize scripts/`.
 - **Docker build:** if `--build` is slow it is downloading numpy /
   confluent-kafka. The deployment needs a working Docker daemon and
   `NET_ADMIN` for `tc-netem`; without it containers warn and continue without
@@ -303,3 +256,7 @@ Known limitations:
   documented proxy fallback unless `download=True` is passed with `pyarrow`.
 - **EXP3–6** run at a reduced `SIM_RATE_SCALE` for runtime, with relative rates
   and distributions preserved; EXP1/EXP2 run at the paper's ~11k items/s.
+
+
+TO run with sampling fraction 0.3
+`TARGET_ERROR=0 FRACTION=0.3 RESULTS_FILE=baseline_03_f50.csv docker compose up --build`

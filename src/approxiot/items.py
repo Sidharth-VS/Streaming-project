@@ -27,3 +27,7 @@ class Item(NamedTuple):
     value: float
     src_window: int = 0
     eff_weight: float = 0.0  # 0.0 = unset -> inherit W_in scalar
+    #: Wall-clock creation time (seconds since epoch) for the deployment path's
+    #: end-to-end latency measurement; 0.0 in the in-process simulation (which
+    #: measures latency from its event trace instead).
+    created_at: float = 0.0

@@ -1,0 +1,242 @@
+# Containerized ApproxIoT deployment (plan Phase 3): Redpanda broker +
+# 8 sources -> 4 L1 -> 2 L2 -> 1 root, the paper's exact 15-node tree (§V-A).
+#
+#   docker compose up --build          # default 60 windows, exits when done
+#   MAX_WINDOWS=20 docker compose up --build   # short smoke run
+#   results/docker_results.csv         # root output: estimate +/- error per window
+#
+# Each container applies its own tc-netem egress delay (20/40/80 ms) in the
+# entrypoint, standing in for the paper's WAN links.  All nodes use the same
+# image; behaviour is entirely environment-driven.
+
+name: approxiot
+
+x-common-env: &common-env
+  KAFKA_BOOTSTRAP: redpanda:9092
+  WORKLOAD: gaussian
+  RATE_SCALE: "0.05"
+  WINDOW_SECONDS: "2"
+  FRACTION: "${FRACTION:-0.5}"        # static sampling fraction for every node
+  MAX_WINDOWS: "${MAX_WINDOWS:-60}"
+  SEED: "42"
+
+x-node: &node
+  build:
+    context: .
+  image: approxiot:local
+  restart: "no"
+  cap_add:
+    - NET_ADMIN
+  depends_on:
+    redpanda:
+      condition: service_healthy
+    topics:
+      condition: service_completed_successfully
+  volumes:
+    - ./results:/results
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  # One partition per topic; `control` is the dedicated controller control plane.
+  topics:
+    image: redpandadata/redpanda:latest
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        for t in in_L1_1 in_L1_2 in_L1_3 in_L1_4 in_L2_1 in_L2_2 in_root control; do
+          rpk -X brokers=redpanda:9092 topic create "$$t" -p 1 -r 1 || true;
+        done
+
+  # ---------------------------------------------------------------- sources
+  source-a1: &source
+    <<: *node
+    environment: &source-env
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: A1
+      NODE_PARENT: L1_1
+      TOPIC_OUT: in_L1_1
+      EGRESS_DELAY_MS: "20"
+    command: ["python", "-m", "approxiot.runtime.node"]
+
+  source-a2:
+    <<: *source
+    environment:
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: A2
+      NODE_PARENT: L1_2
+      TOPIC_OUT: in_L1_2
+      EGRESS_DELAY_MS: "20"
+
+  source-b1:
+    <<: *source
+    environment:
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: B1
+      NODE_PARENT: L1_3
+      TOPIC_OUT: in_L1_3
+      EGRESS_DELAY_MS: "20"
+
+  source-b2:
+    <<: *source
+    environment:
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: B2
+      NODE_PARENT: L1_4
+      TOPIC_OUT: in_L1_4
+      EGRESS_DELAY_MS: "20"
+
+  source-c1:
+    <<: *source
+    environment:
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: C1
+      NODE_PARENT: L1_1
+      TOPIC_OUT: in_L1_1
+      EGRESS_DELAY_MS: "20"
+
+  source-c2:
+    <<: *source
+    environment:
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: C2
+      NODE_PARENT: L1_2
+      TOPIC_OUT: in_L1_2
+      EGRESS_DELAY_MS: "20"
+
+  source-d1:
+    <<: *source
+    environment:
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: D1
+      NODE_PARENT: L1_3
+      TOPIC_OUT: in_L1_3
+      EGRESS_DELAY_MS: "20"
+
+  source-d2:
+    <<: *source
+    environment:
+      <<: *common-env
+      NODE_ROLE: source
+      NODE_NAME: D2
+      NODE_PARENT: L1_4
+      TOPIC_OUT: in_L1_4
+      EGRESS_DELAY_MS: "20"
+
+  # --------------------------------------------------------- first edge tier
+  l1-1: &l1
+    <<: *node
+    environment:
+      <<: *common-env
+      NODE_ROLE: edge
+      NODE_NAME: L1_1
+      NODE_PARENT: L2_1
+      TOPIC_IN: in_L1_1
+      TOPIC_OUT: in_L2_1
+      EGRESS_DELAY_MS: "40"
+    command: ["python", "-m", "approxiot.runtime.node"]
+
+  l1-2:
+    <<: *l1
+    environment:
+      <<: *common-env
+      NODE_ROLE: edge
+      NODE_NAME: L1_2
+      NODE_PARENT: L2_2
+      TOPIC_IN: in_L1_2
+      TOPIC_OUT: in_L2_2
+      EGRESS_DELAY_MS: "40"
+
+  l1-3:
+    <<: *l1
+    environment:
+      <<: *common-env
+      NODE_ROLE: edge
+      NODE_NAME: L1_3
+      NODE_PARENT: L2_1
+      TOPIC_IN: in_L1_3
+      TOPIC_OUT: in_L2_1
+      EGRESS_DELAY_MS: "40"
+
+  l1-4:
+    <<: *l1
+    environment:
+      <<: *common-env
+      NODE_ROLE: edge
+      NODE_NAME: L1_4
+      NODE_PARENT: L2_2
+      TOPIC_IN: in_L1_4
+      TOPIC_OUT: in_L2_2
+      EGRESS_DELAY_MS: "40"
+
+  # -------------------------------------------------------- second edge tier
+  l2-1: &l2
+    <<: *node
+    environment:
+      <<: *common-env
+      NODE_ROLE: edge
+      NODE_NAME: L2_1
+      NODE_PARENT: root
+      TOPIC_IN: in_L2_1
+      TOPIC_OUT: in_root
+      EGRESS_DELAY_MS: "80"
+    command: ["python", "-m", "approxiot.runtime.node"]
+
+  l2-2:
+    <<: *l2
+    environment:
+      <<: *common-env
+      NODE_ROLE: edge
+      NODE_NAME: L2_2
+      NODE_PARENT: root
+      TOPIC_IN: in_L2_2
+      TOPIC_OUT: in_root
+      EGRESS_DELAY_MS: "80"
+
+  # ------------------------------------------------------------------- root
+  root:
+    <<: *node
+    environment:
+      <<: *common-env
+      NODE_ROLE: root
+      NODE_NAME: root
+      TOPIC_IN: in_root
+      QUERY: sum
+      CONFIDENCE: p997
+      # Novel closed loop: meet a 0.5% relative-error target automatically.
+      POLICY: pid
+      CADENCE_WINDOWS: "2"
+      MIN_DWELL_WINDOWS: "3"
+      DEAD_BAND: "0.3"
+      TARGET_ERROR: "${TARGET_ERROR:-0.005}"
+      RESULTS_PATH: /results/${RESULTS_FILE:-docker_results.csv}
+    command: ["python", "-m", "approxiot.runtime.node"]

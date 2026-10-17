@@ -47,6 +47,12 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 #: at a few thousand items/window (fast on CPU) while keeping A:B:C:D ≈ 80:40:20:1.
 SIM_RATE_SCALE = 0.02
 
+#: Rate scale used by EXP1/EXP2 so the simulated cluster ingests ≈11k items/s —
+#: the paper's saturated-cluster throughput (§V-B, Fig. 7: 11,003-12,547 items/s).
+#: The source rates are unscaled relative to each other; only the absolute rate
+#: is reduced from 10^4-10^5 items/s to the paper's measured operating point.
+PAPER_RATE_SCALE = 11_000.0 / 88_125.0
+
 #: Number of windows per run (the paper's experiments run "about an hour";
 #: 64 windows capture the same steady state at this scale).
 NUM_WINDOWS = 64
@@ -58,18 +64,18 @@ METHODS = ("approxiot", "srs", "native")
 
 
 # --------------------------------------------------------------------- specs
-def gaussian_spec() -> SyntheticStreamSpec:
+def gaussian_spec(rate_scale: float = SIM_RATE_SCALE) -> SyntheticStreamSpec:
     """Paper §V-A Gaussian microbenchmark (A/B/C/D at DEFAULT_RATES)."""
     from approxiot.datagen.synthetic import GAUSSIAN_TYPES
 
-    return SyntheticStreamSpec(types=dict(GAUSSIAN_TYPES), rate_scale=SIM_RATE_SCALE)
+    return SyntheticStreamSpec(types=dict(GAUSSIAN_TYPES), rate_scale=rate_scale)
 
 
-def poisson_spec() -> SyntheticStreamSpec:
+def poisson_spec(rate_scale: float = SIM_RATE_SCALE) -> SyntheticStreamSpec:
     """Paper §V-A Poisson microbenchmark."""
     from approxiot.datagen.synthetic import POISSON_TYPES
 
-    return SyntheticStreamSpec(types=dict(POISSON_TYPES), rate_scale=SIM_RATE_SCALE)
+    return SyntheticStreamSpec(types=dict(POISSON_TYPES), rate_scale=rate_scale)
 
 
 def skew_spec() -> SyntheticStreamSpec:
@@ -185,13 +191,20 @@ def loss_vs_fraction_plot(df: pd.DataFrame, title: str, fname: str) -> Path:
 
 
 def throughput_plot(df: pd.DataFrame, title: str, fname: str) -> Path:
-    """Throughput vs sampling fraction (paper Fig. 7 analogue)."""
+    """Throughput vs sampling fraction (paper Fig. 7 analogue).
+
+    Throughput is simulated items processed per second by the input-saturated
+    cluster (paper §V-B methodology), not Python wall-clock speed.  A window
+    includes exactly `window_seconds` of simulated time, so this metric does
+    not grow with the window size.
+    """
     fig, ax = plt.subplots(figsize=(6.5, 4))
     for method, g in df.groupby("method"):
-        agg = g.groupby("fraction")["items_out_total"].mean().reset_index()
-        ax.plot(agg["fraction"], agg["items_out_total"], marker="o", label=method)
+        agg = g.groupby("fraction")["ingest_throughput_items_per_sec"].mean().reset_index()
+        ax.plot(agg["fraction"], agg["ingest_throughput_items_per_sec"],
+                marker="o", label=method)
     ax.set_xlabel("sampling fraction")
-    ax.set_ylabel("forwarded items / window (total)")
+    ax.set_ylabel("items processed / simulated second")
     ax.set_title(title)
     ax.legend()
     ax.grid(alpha=0.3)

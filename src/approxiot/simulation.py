@@ -33,6 +33,7 @@ from approxiot.datagen.synthetic import SyntheticStreamSpec, generate_window
 from approxiot.error_estimation.error_bounds import Confidence
 from approxiot.items import Item
 from approxiot.kafka_io.consumer import Consumer
+from approxiot.latency import LatencyMeasurement, LinkProfile, measure_latency
 from approxiot.kafka_io.producer import Producer
 from approxiot.kafka_io.transport import ControlMessage, InMemoryTransport
 from approxiot.node.base_node import BaseNode, NodeConfig
@@ -133,6 +134,9 @@ class SimulationConfig:
     latency: LinkLatency = field(default_factory=LinkLatency)
     controller: ControllerConfig | None = None
     confidence: Confidence = Confidence.P997
+    #: Per-node processing capacity used by the event-based latency trace
+    #: (items/sec).  The paper's cluster processes ~11-12k items/s (§V-B).
+    latency_capacity_items_per_sec: float = 12_000.0
 
 
 @dataclass
@@ -149,6 +153,8 @@ class Simulation:
         self.driver = driver
         self.config = config
         self.rng = np.random.default_rng(config.seed)
+        # Separate stream: latency sampling must not perturb accuracy results.
+        self._latency_rng = np.random.default_rng(config.seed + 4242)
         self.transport = InMemoryTransport()
         self.exact_by_window: dict[int, float] = {}
         self.exact_count_by_window: dict[int, int] = {}
@@ -373,6 +379,27 @@ class Simulation:
         total_in = sum(n.total_in for n in self.nodes.values())
         total_out = sum(n.total_out for n in self.nodes.values())
         fractions = [n.fraction for n in self.nodes.values()]
+        fraction_mean = sum(fractions) / len(fractions)
+
+        # Event-based latency measurement (paper Figs. 9-10): trace this
+        # window's items through window boundaries, link delays and per-node
+        # processing at a fixed capacity.  Uses the exact source count when
+        # available (static, synchronized case); otherwise the root input count.
+        n_source = self.exact_count_by_window.get(root_result.src_window, 0) or root_result.n_in
+        effective_fraction = 1.0 if cfg.method == "native" else fraction_mean
+        latency: LatencyMeasurement = measure_latency(
+            n_source_items=n_source,
+            fraction=effective_fraction,
+            method=cfg.method,
+            window_seconds=cfg.window_seconds,
+            rng=self._latency_rng,
+            capacity_items_per_sec=cfg.latency_capacity_items_per_sec,
+            links=LinkProfile(
+                source_to_l1_ms=cfg.latency.source_to_l1_ms,
+                l1_to_l2_ms=cfg.latency.l1_to_l2_ms,
+                l2_to_root_ms=cfg.latency.l2_to_root_ms,
+            ),
+        )
 
         result.rows.append(
             {
@@ -392,11 +419,18 @@ class Simulation:
                 "cumulative_loss": cumulative_loss,
                 "n_src_windows_mixed": n_mixture,
                 "fraction_root": self.root.fraction,
-                "fraction_mean_nodes": sum(fractions) / len(fractions),
+                "fraction_mean_nodes": fraction_mean,
                 "items_in_total": total_in,
                 "items_out_total": total_out,
                 "bandwidth_saved": 1.0 - (total_out / total_in) if total_in else 0.0,
-                "e2e_latency_ms": 3 * cfg.window_seconds * 1000.0 + cfg.latency.total_ms,
+                # Items the input-saturated cluster processed per simulated
+                # second in this source window (paper §V-B throughput).
+                "ingest_throughput_items_per_sec": (
+                    n_source / cfg.window_seconds if n_source and cfg.window_seconds > 0 else float("nan")
+                ),
+                "e2e_latency_ms": latency.mean_ms,
+                "e2e_latency_p95_ms": latency.p95_ms,
+                "latency_n_completed": latency.n_completed,
             }
         )
 
@@ -411,6 +445,14 @@ class Simulation:
         ]
         total_in = sum(n.total_in for n in self.nodes.values())
         total_out = sum(n.total_out for n in self.nodes.values())
+        simulated_seconds = cfg.num_windows * cfg.window_seconds
+        items_generated = sum(self.exact_count_by_window.values())
+        latencies = [
+            r["e2e_latency_ms"] for r in rows if not np.isnan(r["e2e_latency_ms"])
+        ]
+        p95s = [
+            r["e2e_latency_p95_ms"] for r in rows if not np.isnan(r["e2e_latency_p95_ms"])
+        ]
         summary = {
             "method": cfg.method,
             "query": cfg.query,
@@ -427,11 +469,26 @@ class Simulation:
                 else float("nan")
             ),
             "bound_coverage": float(np.mean(covered)) if covered else float("nan"),
-            "e2e_latency_ms": 3 * cfg.window_seconds * 1000.0 + cfg.latency.total_ms,
+            "e2e_latency_ms": float(np.mean(latencies)) if latencies else float("nan"),
+            "e2e_latency_p95_ms": float(np.mean(p95s)) if p95s else float("nan"),
+            "latency_measurement": "event_trace",
             "bandwidth_saved": 1.0 - (total_out / total_in) if total_in else 0.0,
-            "items_generated": sum(self.exact_count_by_window.values()),
+            "items_generated": items_generated,
+            "simulated_seconds": simulated_seconds,
+            # Paper definition: items processed per second by the (input-
+            # saturated) cluster.  Absolute rate is the workload's simulated
+            # input rate, not Python wall-clock speed.
+            "throughput_items_per_sec": (
+                items_generated / simulated_seconds if simulated_seconds > 0 else float("nan")
+            ),
+            "forwarded_throughput_items_per_sec": (
+                total_out / simulated_seconds if simulated_seconds > 0 else float("nan")
+            ),
             "wall_seconds": wall_seconds,
-            "throughput_items_per_sec": (total_in / wall_seconds) if wall_seconds > 0 else float("nan"),
+            # Diagnostic only: how fast Python executed the simulation.
+            "wall_clock_throughput_items_per_sec": (
+                total_in / wall_seconds if wall_seconds > 0 else float("nan")
+            ),
             "final_fraction_root": self.root.fraction,
         }
         if self.controller is not None:

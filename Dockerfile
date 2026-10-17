@@ -19,10 +19,7 @@ COPY src ./src
 RUN pip install --no-deps .
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-# Normalize line endings: a CRLF checkout on Windows would otherwise make the
-# kernel look for a interpreter named "bash\r" and every node exits 127.
-RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python", "-m", "approxiot.runtime.node"]
