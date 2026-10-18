@@ -1,0 +1,28 @@
+{
+  "windows_total": 60,
+  "csv_rows": 60,
+  "warmup_rows_skipped": 3,
+  "windows_with_results": 57,
+  "target_error": 0.005,
+  "median_relative_stderr": 0.003985,
+  "max_relative_stderr": 0.012321,
+  "windows_within_target": 40,
+  "windows_within_target_pct": 70.2,
+  "median_latency_ms": 2709.6,
+  "fraction_start": 0.5,
+  "final_fraction": 0.675,
+  "fraction_min": 0.37037,
+  "fraction_max": 0.675,
+  "fraction_changes": 3,
+  "items_in_total": 135775,
+  "items_out_total": 89804,
+  "bandwidth_saved_total": 0.338582,
+  "median_bandwidth_saved": 0.355122,
+  "checks": {
+    "data_flowed": true,
+    "accuracy_target_met": true,
+    "bandwidth_saved_positive": true,
+    "controller_acted": true
+  },
+  "pass": true
+}

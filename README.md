@@ -54,18 +54,35 @@ root:        same sampling ─▶ weighted query (sum/mean) ─▶ error bound
 
 ```sh
 pip install -e ".[dev,realworld]"   # numpy, pandas, matplotlib, pytest
-python -m pytest                    # 63 unit/integration tests
+python -m pytest                    # 77 unit/integration tests
 python -m experiments.run_all       # full experiment suite → results/
 # or: make experiments               (make not available on some Windows shells)
 
 # Containerized deployment (paper's Fig. 5 topology on a real broker):
 docker compose up -d --build         # Redpanda + 15 nodes, 60 windows
 MAX_WINDOWS=20 docker compose up -d --build   # short smoke run
-docker compose logs -f root          # watch the root (Ctrl-C stops following)
+docker compose logs -f root          # live table + final dashboard (Ctrl-C stops following)
+python scripts/summarize_docker_results.py    # summary JSON + Markdown + HTML report
 docker compose ps                    # nodes exit after their windows
-cat results/docker_results.csv       # estimate, error bound, fraction, latency
 docker compose down                  # stop the broker when done
 ```
+
+The root container formats its own output — a header, one aligned row per
+window (estimate ± bound, relative error vs target, bandwidth saved, e2e
+latency), a line whenever the adaptive controller changes the budget, and a
+dashboard when the run ends:
+
+```text
+ win    n_in sampled budget    estimate ± bound   rel.err  saved     e2e
+  12   2,562   1,697  66.2%    21.47 M ± 0.26 M 0.40% ✓    44.5%  3.80 s
+        ↳ controller @ win 9: budget 27.4% → 37.0%  rel.err 1.20% vs target 0.50%
+```
+
+`scripts/summarize_docker_results.py` turns the run into
+`results/docker_summary.json`, `results/docker_report.md` and a self-contained
+`results/docker_report.html` (inline CSS + SVG charts, opens offline) for a demo
+or the write-up. `LOGS=pretty|json|quiet` controls the container logs; see
+[RUNNING.md](RUNNING.md) for the full demo walkthrough.
 
 The deployment path builds one image (`Dockerfile`) and starts 8 sources →
 4 L1 → 2 L2 → 1 root with a Redpanda broker (`docker-compose.yml`).  Every
@@ -74,6 +91,30 @@ applies the paper's 20/40/80 ms `tc-netem` egress latency per tier.  Workload,
 rate scale, window size, sampling fraction, query and controller target are
 environment variables in the compose file.
 
+=======
+
+# Containerized deployment (paper's Fig. 5 topology on a real broker):
+docker compose up -d --build         # Redpanda + 15 nodes, 60 windows
+MAX_WINDOWS=20 docker compose up -d --build   # short smoke run
+docker compose logs -f root          # watch the root (Ctrl-C stops following)
+docker compose ps                    # nodes exit after their windows
+python scripts/summarize_docker_results.py   # or: make docker-results
+docker compose down                  # stop the broker when done
+```
+
+The root writes `results/docker_results.csv` (one row per window) and the
+extractor turns it plus the root's JSON log line into
+`results/docker_summary.json` with the accuracy-vs-target, bandwidth and
+latency aggregates and a `pass` verdict.
+
+The deployment path builds one image (`Dockerfile`) and starts 8 sources →
+4 L1 → 2 L2 → 1 root with a Redpanda broker (`docker-compose.yml`).  Every
+container runs `python -m approxiot.runtime.node`; `scripts/docker-entrypoint.sh`
+applies the paper's 20/40/80 ms `tc-netem` egress latency per tier.  Workload,
+rate scale, window size, sampling fraction, query and controller target are
+environment variables in the compose file.
+
+>>>>>>> Stashed changes
 Optional heavier paths: `pip install -e ".[kafka]"` for the confluent-kafka
 transport module (used by the deployment path); `download=True` arguments in
 `datagen/real_world.py` fetch the real NYC TLC/OpenAQ datasets (offline falls

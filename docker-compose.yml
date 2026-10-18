@@ -19,6 +19,9 @@ x-common-env: &common-env
   FRACTION: "${FRACTION:-0.5}"        # static sampling fraction for every node
   MAX_WINDOWS: "${MAX_WINDOWS:-60}"
   SEED: "42"
+  # pretty = live per-window table + final dashboard (demo default);
+  # json = only the machine-readable summary line; quiet = nothing.
+  LOGS: "pretty"
 
 x-node: &node
   build:
@@ -50,7 +53,9 @@ services:
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
     ports:
-      - "9092:9092"
+      # Host-side port only (the nodes talk to redpanda:9092 internally).
+      # Override with KAFKA_HOST_PORT if 9092 is taken on the host.
+      - "${KAFKA_HOST_PORT:-9092}:9092"
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 5s

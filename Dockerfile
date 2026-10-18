@@ -19,7 +19,10 @@ COPY src ./src
 RUN pip install --no-deps .
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# Tolerate a CRLF checkout (core.autocrlf=true on Windows): a stray \r in the
+# shebang makes every node exit 127 with `env: 'bash\r': No such file`.
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python", "-m", "approxiot.runtime.node"]

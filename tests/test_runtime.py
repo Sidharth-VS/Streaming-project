@@ -74,6 +74,50 @@ def test_source_to_root_pipeline_produces_estimates_and_csv(tmp_path: Path):
     assert len(rows) == 10 and rows[-1]["approx"] != ""
 
 
+def test_pretty_logs_show_a_table_and_a_dashboard(capsys, tmp_path: Path):
+    bus = FakeBus()
+    source = NodeRuntime(_source_config(), bus)
+    root = NodeRuntime(
+        _root_config(results_path=str(tmp_path / "root.csv"), target_error=0.02,
+                     logs="pretty"),
+        bus,
+    )
+    root.announce()
+    for window in range(10):
+        source.step(window)
+        root.step(window)
+    root.finish()
+
+    out = capsys.readouterr().out
+    assert "ApproxIoT \u00b7 distributed approximate querying" in out
+    assert "workload gaussian" in out
+    assert "[root] root ready" not in out  # the root gets the banner, not a ready line
+    assert "win" in out and "estimate ± bound" in out
+    assert "ApproxIoT root summary" in out
+    assert "verdict" in out
+    # The JSON line stays available to the summarizer, before the human panel.
+    json_lines = [line for line in out.splitlines() if line.startswith("{")]
+    assert len(json_lines) == 1
+    assert '"node": "root"' in json_lines[0]
+    assert out.index(json_lines[0]) < out.index("ApproxIoT root summary")
+
+
+def test_json_logs_stay_machine_readable(capsys, tmp_path: Path):
+    bus = FakeBus()
+    source = NodeRuntime(_source_config(logs="json"), bus)
+    root = NodeRuntime(
+        _root_config(results_path=str(tmp_path / "root.csv"), logs="json"), bus
+    )
+    for window in range(6):
+        source.step(window)
+        root.step(window)
+    root.finish()
+
+    out = capsys.readouterr().out
+    assert len(out.strip().splitlines()) == 1
+    assert out.startswith('{"node": "root"')
+
+
 def test_source_sampling_reduces_forwarded_volume():
     bus = FakeBus()
     source = NodeRuntime(_source_config(fraction=0.2, rate_scale=0.02), bus)
@@ -116,6 +160,10 @@ def test_config_from_env_and_validation():
     assert cfg.node_name == "L2_1" and cfg.role == "edge"
     assert cfg.window_seconds == 1.5 and cfg.max_windows == 12
     assert cfg.target_error == 0.005
+    assert cfg.logs == "pretty"  # demo-friendly default
+    assert RuntimeConfig.from_env({**env, "LOGS": "JSON"}).logs == "json"
+    with pytest.raises(ValueError):
+        RuntimeConfig.from_env({**env, "LOGS": "loud"})
 
     with pytest.raises(ValueError):
         RuntimeConfig(node_name="x", role="edge", topic_out="t")
