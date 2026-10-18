@@ -1,6 +1,7 @@
 PYTHON ?= python3
 
-.PHONY: setup test experiments run-all clean docker-build docker-up docker-smoke docker-logs docker-results docker-down
+.PHONY: setup test experiments run-all clean docker-build docker-up docker-smoke \
+        docker-watch docker-logs docker-results docker-report docker-down
 
 setup:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -15,7 +16,7 @@ experiments:
 run-all: experiments
 
 clean:
-	rm -rf results/*.png results/*.csv results/*.json
+	rm -rf results/*.png results/*.csv results/*.json results/*.md results/*.html
 	touch results/.gitkeep
 
 docker-build:
@@ -27,15 +28,24 @@ docker-build:
 docker-up:
 	docker compose up -d --build
 
-# Short end-to-end check: 20 windows (~40 s of simulated time).
+# Short end-to-end check: 20 windows (~40 s).
 docker-smoke:
 	MAX_WINDOWS=20 docker compose up -d --build
+
+# Live demo view: the root's formatted per-window table and final dashboard.
+docker-watch:
+	docker compose logs -f root
 
 docker-logs:
 	docker compose logs -f
 
+# Raw root CSV (one row per window).
 docker-results:
 	@cat results/docker_results.csv
+
+# Formatted stdout report + docker_summary.json + Markdown/HTML artifacts.
+docker-report:
+	$(PYTHON) scripts/summarize_docker_results.py
 
 docker-down:
 	docker compose down

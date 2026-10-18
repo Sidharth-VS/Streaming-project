@@ -51,8 +51,11 @@ from approxiot.kafka_io.transport import ControlMessage
 from approxiot.node.base_node import BaseNode, NodeConfig
 from approxiot.node.root_node import RootNode, RootResult
 from approxiot.node.sampling_node import SamplingNode
+from approxiot.runtime import report
 
 ROLES = ("source", "edge", "root")
+#: ``LOGS``: pretty console output (default), the old single JSON line, or silence.
+LOG_STYLES = ("pretty", "json", "quiet")
 
 #: Root result CSV columns (one row per completed window).
 RESULT_FIELDS = (
@@ -127,6 +130,7 @@ class RuntimeConfig:
     min_dwell_windows: int = 3
     dead_band: float = 0.3
     bootstrap_servers: str = "redpanda:9092"
+    logs: str = "pretty"
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:
@@ -141,6 +145,8 @@ class RuntimeConfig:
             raise ValueError("FRACTION must be in (0, 1]")
         if self.window_seconds <= 0:
             raise ValueError("WINDOW_SECONDS must be positive")
+        if self.logs not in LOG_STYLES:
+            raise ValueError(f"LOGS must be one of {LOG_STYLES}, got {self.logs!r}")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "RuntimeConfig":
@@ -179,6 +185,7 @@ class RuntimeConfig:
             bootstrap_servers=env.get("KAFKA_BOOTSTRAP")
             or env.get("BOOTSTRAP_SERVERS")
             or "redpanda:9092",
+            logs=env.get("LOGS", "pretty").lower(),
         )
 
 
@@ -221,6 +228,8 @@ class NodeRuntime:
         self.rows: list[dict] = []
         self.windows_completed = 0
         self._stop = False
+        self.painter = report.Painter(report.color_enabled())
+        self._printed_table_header = False
         self._csv_file = None
         self._csv_writer: csv.DictWriter | None = None
         if config.role == "root" and config.results_path:
@@ -274,6 +283,67 @@ class NodeRuntime:
         if self._csv_writer is not None and self._csv_file is not None:
             self._csv_writer.writerow({k: row.get(k) for k in RESULT_FIELDS})
             self._csv_file.flush()
+
+    # ------------------------------------------------------------ demo output
+    def announce(self) -> None:
+        """One readable line at startup (root: a header describing the run)."""
+        if self.config.logs != "pretty":
+            return
+        cfg = self.config
+        if cfg.role != "root":
+            print(
+                report.node_ready(cfg.node_name, cfg.role, cfg.parent, self.painter),
+                flush=True,
+            )
+            return
+        confidence = {"P68": "p68", "P95": "p95", "P997": "p99.7"}.get(
+            cfg.confidence.name, cfg.confidence.name.lower()
+        )
+        detail = [f"window {cfg.window_seconds:g} s", f"seed {cfg.seed}"]
+        if cfg.max_windows:
+            detail.append(f"{cfg.max_windows} windows")
+        control = [f"budget {report.pct(cfg.fraction, 1)} initial"]
+        if cfg.target_error > 0:
+            control.append(f"target rel. stderr \u2264 {report.pct(cfg.target_error, 3)}")
+            control.append(f"controller {cfg.policy}")
+        print(
+            report.banner(
+                "ApproxIoT \u00b7 distributed approximate querying over a 15-node tree",
+                [
+                    f"8 sources \u2192 4 \u00d7 L1 \u2192 2 \u00d7 L2 \u2192 root   "
+                    f"{report.BULLET}   workload {cfg.workload} "
+                    f"(\u2248 {report.human_int(self.total_expected)} items/window)",
+                    f"query {cfg.query} @ {confidence}",
+                    "   ".join(control),
+                ],
+                detail=detail,
+                p=self.painter,
+            ),
+            flush=True,
+        )
+
+    def _log_window(self, row: dict) -> None:
+        if self.config.logs != "pretty" or row["n_in_root"] <= 0:
+            return
+        if not self._printed_table_header:
+            print(report.table_header(), flush=True)
+            self._printed_table_header = True
+        print(
+            report.window_row(
+                row["window"],
+                row["n_in_root"],
+                row["n_sampled_root"],
+                row["fraction_root"],
+                row["approx"],
+                row["error_bound"],
+                row["stderr_relative"],
+                row["bandwidth_saved"],
+                row["e2e_latency_ms"],
+                target_error=self.config.target_error,
+                p=self.painter,
+            ),
+            flush=True,
+        )
 
     # ---------------------------------------------------------------- window
     def apply_control(self) -> None:
@@ -329,8 +399,7 @@ class NodeRuntime:
             for item in msg.items
             if item.created_at > 0
         ]
-        self._write_row(
-            {
+        row = {
                 "window": window,
                 "src_window": result.src_window,
                 "approx": result.approx,
@@ -348,20 +417,35 @@ class NodeRuntime:
                     float(np.percentile(latencies, 95)) if latencies else float("nan")
                 ),
                 "wall_time": now,
-            }
-        )
+        }
+        self._write_row(row)
+        self._log_window(row)
 
     def _maybe_control(self, window: int, result: RootResult) -> None:
         if self.controller is None:
             return
         message = self.controller.observe(window, result.stderr_relative)
         if message is not None:
+            if self.config.logs == "pretty" and self.controller.history:
+                event = self.controller.history[-1]
+                print(
+                    report.controller_change(
+                        event.window,
+                        event.old_fraction,
+                        event.new_fraction,
+                        event.observed_error,
+                        event.target,
+                        self.painter,
+                    ),
+                    flush=True,
+                )
             self.transport.publish(self.config.control_topic, message)
 
     # ------------------------------------------------------------------ loop
     def run(self, max_windows: int | None = None) -> None:
         cfg = self.config
         total = cfg.max_windows if max_windows is None else max_windows
+        self.announce()
         if cfg.start_delay_seconds > 0:
             time.sleep(cfg.start_delay_seconds)
         started = time.monotonic()
@@ -392,13 +476,13 @@ class NodeRuntime:
             "items_out": total_out,
             "bandwidth_saved": round(1.0 - total_out / total_in, 6) if total_in else 0.0,
             "final_fraction": round(self.node.fraction, 6),
+            "fraction_start": round(self.config.fraction, 6),
+            "target_error": self.config.target_error,
         }
         if self.config.role == "root":
-            losses = [r["stderr_relative"] for r in self.rows if r["n_in_root"] > 0]
-            summary["windows_with_results"] = len(losses)
-            summary["median_relative_stderr"] = (
-                round(float(np.median(losses)), 6) if losses else None
-            )
+            # Same aggregation as the recorded artifact, so the live panel and
+            # results/docker_summary.json can never disagree.
+            summary.update(report.summarize_rows(self.rows, self.config.target_error))
             summary["results_path"] = self.config.results_path
             measured = [
                 r["e2e_latency_ms"] for r in self.rows
@@ -412,7 +496,26 @@ class NodeRuntime:
                     1 for e in self.controller.history if e.action == "set"
                 )
                 summary["final_controller_fraction"] = round(self.controller.fraction, 6)
-        print(json.dumps(summary, default=str), flush=True)
+
+        # Machine-readable line first: `scripts/summarize_docker_results.py`
+        # scans the log for it, and the human panel below stays the last thing
+        # on screen for a live demo.
+        if self.config.logs != "quiet":
+            print(json.dumps(summary, default=str), flush=True)
+        if self.config.logs == "pretty":
+            measured_rows = [r for r in self.rows if r["n_in_root"] > 0]
+            if self.config.role == "root":
+                print(
+                    report.root_panel(
+                        summary,
+                        fraction_series=[r["fraction_root"] for r in measured_rows],
+                        stderr_series=[r["stderr_relative"] for r in measured_rows],
+                        p=self.painter,
+                    ),
+                    flush=True,
+                )
+            else:
+                print(report.node_done(summary, self.painter), flush=True)
         return summary
 
 

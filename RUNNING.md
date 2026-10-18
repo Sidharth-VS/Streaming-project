@@ -26,7 +26,7 @@ python -m pytest
 make test
 ```
 
-Expected: **63 passed** in about 1 second.
+Expected: **77 passed** in about 1 second.
 
 Targeted subsets:
 
@@ -134,30 +134,76 @@ docker compose up -d --build
 make docker-up
 ```
 
-Monitor and collect:
+Watch the run — this is the demo view (second terminal, works while running):
 
 ```bash
-docker compose ps
-docker compose logs -f root                  # Ctrl-C stops following only
-docker compose logs --tail=20 source-a1 l1-1 l2-1
-docker compose logs root | tail -20
-make docker-results                          # cat results/docker_results.csv
+docker compose logs -f root                  # formatted table, then the dashboard
+make docker-watch                            # same thing
+```
 
+The root prints a header, then one aligned row per window as it lands:
+
+```text
+ win    n_in sampled budget    estimate ± bound   rel.err  saved     e2e
+   3     678     251  37.0%    23.18 M ± 0.99 M 1.43% ✗    63.0%  5.09 s
+   4     622     230  37.0%    32.42 M ± 1.71 M 1.76% ✗    63.0%  5.84 s
+        ↳ controller @ win 5: budget 37.0% → 27.4%  rel.err 1.20% vs target 0.50%
+```
+
+Each sampling node adds one `ready` line and one `done` line; the sources, L1
+and L2 nodes stay quiet otherwise so the root's table is readable.
+
+When the run finishes, the root prints the dashboard (and a JSON line just
+before it, which `summarize_docker_results.py` reads):
+
+```text
+══════════════════════════════════════════════════════════════════════════════
+ ApproxIoT root summary
+──────────────────────────────────────────────────────────────────────────────
+  windows      55 measured  (5 warm-up)
+  accuracy     median rel. stderr 0.41%  vs target ≤ 0.500%   ✔ PASS
+               within target 40/55 (72.7%)  · worst 1.76%
+  bandwidth    saved 34.2% total  · median 36.8%
+  latency      median 4.35 s end-to-end
+  controller   5 changes  · 50.0% → 67.5%  ▁▁▂▃▅
+  items        119,592 in → 78,738 out
+  verdict      PASS
+  checks       ✔ data flowed  ✔ accuracy  ✔ bandwidth  ✔ controller acted
+══════════════════════════════════════════════════════════════════════════════
+```
+
+Then record the run and collect the artifacts:
+
+```bash
+python scripts/summarize_docker_results.py   # or: make docker-report
+docker compose ps -a                         # every node should read Exited (0)
 docker compose down                          # stop the broker when done
 ```
 
-Expected startup line in every node container:
+`summarize_docker_results.py` writes three files:
+
+| File | Use |
+|---|---|
+| `results/docker_summary.json` | the recorded metrics + `pass` / `checks` |
+| `results/docker_report.md` | Markdown table for the write-up or a README |
+| `results/docker_report.html` | self-contained charts (no server, no network) |
+
+Open the HTML report directly in a browser — it inlines its CSS and SVG, so it
+works offline. `--json-only` prints the machine summary, `--no-artifacts` skips
+the Markdown/HTML files, `--csv` points at a different run.
+
+Logging knobs (both are in `docker-compose.yml`):
+
+| Variable | Effect |
+|---|---|
+| `LOGS` | `pretty` (default): table + dashboard; `json`: only the JSON line; `quiet`: nothing |
+| `LOG_COLOR` | `always` forces ANSI colour when output is piped (`never` disables it) |
+| `KAFKA_HOST_PORT` | host-side broker port, default `9092`; use `19092` if a local Kafka already holds 9092 |
+
+Startup line in every node container (unchanged):
 
 ```text
 [entrypoint] netem: eth0 egress delay 20ms   # 40ms for L1, 80ms for L2
-```
-
-Expected final root summary:
-
-```json
-{"node":"root","windows":20,"windows_with_results":17,
- "median_relative_stderr":0.0066,"controller_num_changes":3,
- "final_fraction":0.675,"median_latency_ms":3048.5}
 ```
 
 The 15 node containers exit when their window count is reached; **Redpanda keeps
@@ -235,13 +281,15 @@ Known gaps (by design, not defects):
 
 | Check | Command | Result |
 |---|---|---|
-| Unit/integration tests | `python -m pytest` | 63 passed (exit 0) |
+| Unit/integration tests | `python -m pytest` | 77 passed (exit 0) |
 | Experiment suite | `python -m experiments.run_all` | exit 0, all six verdicts pass |
 | Notebook cells | executed against `results/` | all code cells run |
 | Compose file | `docker compose config --quiet` | valid |
-| Makefile targets | `make -n docker-up docker-smoke docker-logs docker-results docker-down` | correct commands |
+| Makefile targets | `make -n docker-up docker-smoke docker-watch docker-report docker-down` | correct commands |
 | Entrypoint syntax | `bash -n scripts/docker-entrypoint.sh` | OK |
-| Live stack | `MAX_WINDOWS=20 docker compose up -d --build` | 15 nodes + Redpanda ran; controller changed budgets; latency recorded per window |
+| Live stack | `KAFKA_HOST_PORT=19092 docker compose up -d --build` | 15 nodes + Redpanda ran 60 windows; all nodes `Exited (0)`; PASS verdict |
+| Live formatting | `docker compose logs root` | header, 57 table rows, 3 controller-change lines, dashboard |
+| Report artifacts | `python scripts/summarize_docker_results.py` | exit 0; JSON + Markdown + HTML written, `pass: true` |
 
 Known limitations:
 
